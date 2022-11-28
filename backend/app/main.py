@@ -49,6 +49,28 @@ async def get_blur(cldId, imgId, background_tasks: BackgroundTasks):
     background_tasks.add_task(remove_file, img_path)
     return FileResponse(img_path)
 
+# Endpoint for retrieving a blurred version of an image
+# The image is fetched from the URL in the post body and a blur is applied to it, the result is returned
+@app.get("/get-filter-joshua/{cldId}/{imgId}")
+async def get_filter_joshua(cldId, imgId, background_tasks: BackgroundTasks):
+
+    img_path = 'app/bib/' + imgId + ".jpg"
+    image_url = "https://tcmp.photoprintit.com/api/photos/" + imgId + ".org?size=original&errorImage=false&cldId=" + cldId + "&clientVersion=0.0.0-uni_webapp_demo"
+
+    urllib.request.urlretrieve(image_url, img_path)
+
+    blurImage = Image.open(img_path)
+    # Here I use the Pillow library to apply a simple box blur on the fetched image, alternatively OpenCV can be used
+    # instead of Pillow
+
+    #blurImage = blurImage.filter(ImageFilter.BoxBlur(10))
+
+    blurImage.save(img_path)
+
+    # The background task runs after the File is returned completetly
+    background_tasks.add_task(remove_file, img_path)
+    return FileResponse(img_path)
+
 # Delete a file
 def remove_file(path: str) -> None:
     os.unlink(path)
