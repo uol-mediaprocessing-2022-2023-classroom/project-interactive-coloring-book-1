@@ -63,6 +63,7 @@ async def get_filter_joshua(cldId, imgId, background_tasks: BackgroundTasks):
     # Here I use the Pillow library to apply a simple box blur on the fetched image, alternatively OpenCV can be used
     # instead of Pillow
 
+    #test
     #blurImage = blurImage.filter(ImageFilter.BoxBlur(10))
 
     blurImage.save(img_path)
