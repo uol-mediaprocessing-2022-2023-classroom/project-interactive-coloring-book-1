@@ -7,6 +7,7 @@ import ssl
 import os
 from starlette.background import BackgroundTasks
 import urllib.request, urllib.parse
+import cv2
 
 app = FastAPI()
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -39,15 +40,29 @@ async def get_blur(cldId, imgId, background_tasks: BackgroundTasks):
 
     urllib.request.urlretrieve(image_url, img_path)
 
-    blurImage = Image.open(img_path)
+#    blurImage = Image.open(img_path)
     # Here I use the Pillow library to apply a simple box blur on the fetched image, alternatively OpenCV can be used
     # instead of Pillow
-    blurImage = blurImage.filter(ImageFilter.BoxBlur(10))
-    blurImage.save(img_path)
+#    blurImage = blurImage.filter(ImageFilter.BoxBlur(10))
+#    blurImage.save(img_path)
 
     # The background task runs after the File is returned completetly
-    background_tasks.add_task(remove_file, img_path)
-    return FileResponse(img_path)
+#   background_tasks.add_task(remove_file, img_path)
+#    return FileResponse(img_path)
+
+    edgeImage = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    sobelX = cv2.Sobel(edgeImage, cv2.CV_64F, 0, 1)
+    sobelY = cv2.Sobel(edgeImage, cv2.CV_64F, 1, 0)
+
+    sobelXY = cv2.bitwise_or(sobelX, sobelY)
+    cv2.imwrite('sobel.png', sobelXY)
+    read = cv2.imread('sobel.png', cv2.IMREAD_GRAYSCALE)
+    sobel = cv2.bitwise_not(read)
+
+    image = cv2.imwrite('sobel.png', sobel)
+    return FileResponse('sobel.png')
+
+
 
 # Delete a file
 def remove_file(path: str) -> None:
