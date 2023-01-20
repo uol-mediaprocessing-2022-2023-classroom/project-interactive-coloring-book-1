@@ -1,24 +1,27 @@
-# Importing required boundaries
+
 from skimage.segmentation import slic, mark_boundaries
-from skimage.data import astronaut
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from skimage.color import label2rgb
-from PIL import Image
+import cv2
 
 
-image = Image.open('flower.jpg')
-image = image.resize((int(image.size[0]/3),int(image.size[1]/3)))
-image.save('newFlower.jpg')
-# Setting the plot figure as 15, 15
-plt.figure(figsize=(15, 15))
+img = mpimg.imread('mountains.jpg')
 
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
+img = cv2.GaussianBlur(img,(5,5),0)
 
-img = mpimg.imread('newFlower.jpg')
 
 # Applying SLIC segmentation
 img_segments = slic(img,
-						n_segments=500,
+						n_segments=250,
 						compactness=10)
 
 plt.subplot(2, 2, 1)
@@ -31,7 +34,7 @@ plt.subplot(2, 2, 2)
 
 # Plotting the output of marked_boundaries
 # function i.e. the image with segmented boundaries
-plt.imshow(mark_boundaries(img, img_segments))
+plt.imshow(mark_boundaries(img, img_segments, color=(0,0,0)))
 
 plt.subplot(2, 2, 3)
 
@@ -39,6 +42,6 @@ plt.subplot(2, 2, 3)
 plt.imshow(label2rgb(img_segments, img, kind = 'avg'))
 
 plt.subplot(2, 2, 4)
-plt.imshow(mark_boundaries(label2rgb(img_segments, img, kind = 'avg'), img_segments))
+plt.imshow(mark_boundaries(label2rgb(img_segments, img, kind = 'avg'), img_segments, color=(0,0,0)))
 
 plt.show()
