@@ -4,7 +4,6 @@ import cv2 as cv
 import numpy
 from PIL import Image
 from skimage import segmentation
-import matplotlib.image as mpimg
 from skimage.color import label2rgb
 
 
@@ -90,38 +89,72 @@ def checkNeighbour(x, y, pixel_matrix, pixel_zone_matrix, pixel_colour, colour_o
                 pixel_zone_matrix[x_to_check - 1, y_to_check] = index_of_zone
     return zone, pixel_matrix, pixel_zone_matrix
 
-def kMeans(img, blurKernel):
-    img = cv2.GaussianBlur(img, (blurKernel, blurKernel), 0)
 
-    Z = img.reshape((-1, 3))
-    # convert to np.float32
-    Z = np.float32(Z)
-    # define criteria, number of clusters(K) and apply kmeans()
+'''
+    wendet k-Means auf das übergebene Bild an, was das Bild in eine festgelegte Anzahl von Farben einteilt
+
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Das zu bearbeitende Bild als numpy.ndarray
+    blur_kernel_size : int
+        Die Grösse die der Kernel für das Blurren mit dem Gaussfilter haben soll
+        
+    Returns
+    -------
+    result_img : numpy.ndarray
+        Das mit kmeans bearbeitete Bild wird als numpy.ndarray in BGR zurückgegeben
+'''
+
+
+def k_means(img, blur_kernel_size, k):
+    # das Bild wird geblurrt, zur besseren Weiterverarbeitung
+    img = cv2.GaussianBlur(img, (blur_kernel_size, blur_kernel_size), 0)
+
+    # dasd Bildarray wird umgeformt und zu float32 konvertiert (ist durch cv2 unit8)
+    tmp_img = img.reshape((-1, 3))
+    tmp_img = np.float32(tmp_img)
+
+    # die Kriterien und die Anzahl der Farben für kmeans werden definiert und kmeans dann angewendet
     criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-    K = 12
-    ret, label, center = cv.kmeans(Z, K, None, criteria, 10, cv.KMEANS_RANDOM_CENTERS)
 
-    # Now convert back into uint8, and make original image
+    ret, label, center = cv.kmeans(tmp_img, k, None, criteria, 10, cv.KMEANS_RANDOM_CENTERS)
+
+    # das Bildarray wird wieder zurück in uint8 konvertiert und wieder in die ursprüngliche Form umgeformt
     center = np.uint8(center)
     res = center[label.flatten()]
-    img = res.reshape((img.shape))
-    return img
+    result_img = res.reshape(img.shape)
 
-# Main Methode
-def main():
-
-    img = cv.imread('mountains.jpg')
-
-    img = kMeans(img, 17)
-
-    cv.imwrite("testK1.png", img)
+    # das Resultat wird zurückgegeben
+    return result_img
 
 
-    # Spielraum der farbe
+'''
+    Erstellt eine Maske des Bildes zur Weiterbearbeitung mit SLIC.
+    Alle Bereiche die grösser als der Threshold sind werden maskiert, damit SLIC diese nicht beachtet
+
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Das zu bearbeitende Bild als numpy.ndarray
+    zone_size_threshold : int
+        Der Schwellenwert den die Zonen unterbieten müssen, um nicht maskiert zu werden
+
+    Returns
+    -------
+    result_mask : numpy.ndarray
+        Die erstellte Maske wird als numpy.ndarray in Grayscale zurückgegeben
+'''
+
+
+def create_mask(img, zone_size_threshold):
+    # Spielraum der Farbe
     colour_toleranz = 0
 
-    # liest kmeans Bild ein und lädt Matrix mit Pixel Farben
+    # das numpy.ndarray wird zu PIL.Image.Image umgewandelt
     img = Image.fromarray(img)
+
+    # lädt Matrix mit Pixel Farben
     pixel_colour = img.load()
 
     # erstellt eine Liste für alle Zonen, die erkannt werden
@@ -153,49 +186,184 @@ def main():
                 # erhöht Zonen Index nach erkannter Zone
                 index_of_zone = index_of_zone + 1
 
+    # Array zur Speicherung der Zonen die kleiner als zoneSizeThreshold sind
     zone_list_small = []
 
-
+    # fügt zone_list_small die Zonen zu, die kleiner als zoneSizeThreshold sind
     for p in range(0, len(zone_list)):
-        if 50 < len(zone_list[p]) < 50000:
+        if len(zone_list[p]) < zone_size_threshold:
             zone_list_small.append(zone_list[p])
 
-    mask = Image.new("1", (size_x, size_y), 0)
+    # erstellt ein komplett schwarzes Greyscale-Bild als PIL.Image.Image, welches die gleiche Grösse hat, wie unser Bild
+    mask = Image.new("L", (size_x, size_y), 0)
 
+    # die Zonen die kleiner als der Threshold sind, werden als weisse Zonen an den gleichen Koordinaten,
+    # die sie im Ursprungs-Bild haben, in das Greyscale-Bild übertragen
     for p in range(0, len(zone_list_small)):
-        for l in range(0, len(zone_list_small[p])):
-            mask.putpixel((zone_list_small[p][l][0], zone_list_small[p][l][1]), 1)
+        for q in range(0, len(zone_list_small[p])):
+            mask.putpixel((zone_list_small[p][q][0], zone_list_small[p][q][1]), 255)
 
-    mask.save("testMask.png")
+    # Abspeicherung des Bildes zu Testzwecken
+    mask.save("pictures/testResults/testMask.png")
 
-    img = cv2.imread("testMask.png", cv2.IMREAD_UNCHANGED)
+    # Umwandlung des PIL.Image.Image zu numpy.ndarray zur Weiterverarbeitung
+    mask = np.array(mask)
 
-    mask = img
+    # Erstellen des Kernel für die morphologischen Filter
     kernel = np.ones((5, 5), np.uint8)
 
+    # verringert "weisses Rauschen"
     opening = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    # verringert "schwarzes Rauschen"
     closing = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    print(opening.shape)
 
-    cv2.imwrite("testClosedMask.png", closing)
+    # Auswahl ob unbearbeitete, geöffnete, oder geschlossene Maske verwendet werden soll
+    result_mask = mask
 
-    img = mpimg.imread('testK1.png')
+    # Abspeicherung des Bildes zu Testzwecken
+    cv2.imwrite("pictures/testResults/testResultMask.png", result_mask)
 
-    print(img.shape)
+    # das Resultat wird zurückgegeben
+    return result_mask
 
-    mask = mpimg.imread('testClosedMask.png')
 
-    print(mask.shape)
+'''
+    Wendet mit Hilfe einer Maske SLIC auf das zu bearbeitende Bild an.
+    Die Maske sorgt dafür, das SLIC nur auf relevante Teile angewandt wird
+    und nicht auf grosse einfarbige Segmente des Bildes.
+    SLIC sorgt dafür, dass das Bild in Superpixel aufgeteilt wird
 
-    m_slic = segmentation.slic(img, n_segments=1000, mask=mask, compactness=1)
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Das zu bearbeitende Bild als numpy.ndarray in BGR
+    mask : numpy.ndarray
+        Die Maske die verwendet werden soll als numpy.ndarray in Grayscale
+        
+    Returns
+    -------
+    result_img : PIL.Image.Image
+        Der unmaskierte Teil des Bildes der mit SLIC bearbeitet wurde, wird als PIL.Image.Image zurückgegeben
+'''
 
-    src = label2rgb(m_slic, img, kind='avg')
 
-    mpimg.imsave("testSLIC.png", src)
+def mask_slic(img, mask, slic_segments):
+    # opencv benutzt standardmässig BGR, wir brauchen nun aber RGB: Daher wird das Bild nun in RGB konvertiert
+    tmp_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+    # SLIC wird auf den unmaskierten Teil des Bildes angewandt und das Bild wird in Superpixel segmentiert
+    m_slic = segmentation.slic(tmp_img, n_segments=slic_segments, mask=mask, compactness=1)
+
+    # die durchschnittliche Farbe eines Superpixel wird nun verwendet um diesen Superpixel auszufüllen
+    tmp_img = label2rgb(m_slic, tmp_img, kind='avg')
+
+    # wandelt das numpy.ndarray zu PIL.Image.Image um (Grund: für die Weiterverarbeitung wird eine Image Datei und
+    # kein Array benötigt)
+    result_img = Image.fromarray(tmp_img, 'RGB')
+
+    # Abspeicherung des Bildes zu Testzwecken
+    result_img.save("pictures/testResults/testSLIC.png")
+
+    # das Resultat wird zurückgegeben
+    return result_img
+
+
+'''
+    Legt das durch SLIC erstellte Bild, welches durch die Maske nur ein Ausschnitt des gesamten Bildes ist, über
+    das mit kMeans erstellte Bild, um wieder ein vollständiges Bild zu erhalten
+
+    Parameters
+    ----------
+    foreground : PIL.Image.Image
+        Der von SLIC bearbeitete Ausschnitt des Bildes der über das von kMeans erstellte Bild gelegt wird, als 
+        PIL.Image.Image
+    background : numpy.ndarray
+        Das von kMeans erstellte Bild, auf das der Ausschnit gelegt wird, als numpy.ndarray
+
+    Returns
+    -------
+    result_img : PIL.Image.Image
+        Das zusammengefügte Bild als PIL.Image.Image
+'''
+
+
+def combine_mask_slic_and_kmeans(foreground, background):
+    # konvertiert den Vordergrund zur RGBA
+    foreground_rgba = foreground.convert("RGBA")
+
+    # das Bild wird in eine eindimensionale Sequenz von Pixeln gewandelt
+    datas = foreground_rgba.getdata()
+
+    new_data = []
+
+    # findet anhand des RGB-Wertes schwarze Farbe, und speichert diese dann anstatt schwarz als transparent ab
+    # andere Farben bleiben unverändert
+    for item in datas:
+        if item[0] == 0 and item[1] == 0 and item[2] == 0:
+            new_data.append((255, 255, 255, 0))
+        else:
+            new_data.append(item)
+
+    # die eindimensionale Sequenz von Pixeln wird wieder in ein Bild umgewandelt
+    foreground_rgba.putdata(new_data)
+
+    # der Hintergrund ist in BGR und muss in RGB umgewandelt
+    background = cv2.cvtColor(background, cv2.COLOR_BGR2RGB)
+
+    # der Hintergrund von numpy.ndarray in PIL.Image.Image umgewandelt
+    background = Image.fromarray(background)
+
+    # Fügt den Vordergrund auf den Hintergrund ein
+    # fängt bei den Koordinaten (0,0) an
+    background.paste(foreground_rgba, (0, 0), mask=foreground_rgba)
+
+    result_img = background
+
+    # Abspeicherung des Bildes zu Testzwecken
+    result_img.save("pictures/testResults/testSLICandKCombined.png")
+
+    # das Resultat wird zurückgegeben
+    return result_img
+
+
+# Main Methode
+def main():
+    img = cv.imread('pictures/wolf.jpg')
+
+    # Variablen defininiere, für Schwierigkeitsgrad ggf. ändern
+    first_blur = 17
+    second_blur = 11
+    zone_size_threshold = 75000
+    slic_segments = 1000
+    k = 12
+
+    # Bild in Farbbereiche aufteilen
+    k_means_img = k_means(img, first_blur, 12)
+
+    # Abspeicherung des Bildes
+    cv.imwrite("pictures/testResults/testKMeans.png", k_means_img)
+
+    # erstellt eine Maske für SLIC
+    mask = create_mask(k_means_img, zone_size_threshold)
+
+    # superpixel erstellen
+    slic_img = mask_slic(k_means_img, mask, slic_segments)
+
+    # Kombinierung der von SLIC und k-means erstellten Bilder
+    img = combine_mask_slic_and_kmeans(slic_img, k_means_img)
+
+    # PIL.Image.Image in numpy.ndarray umwandeln
+    img = numpy.array(img)
+
+    # numpy.ndarray wird von RGB in BGR umgewandelt
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    # kombinierte Bild noch einmal in die Farbbereiche aufteilen
+    result = k_means(img, second_blur, k)
+
+    # Abspeicherung des Bildes
+    cv.imwrite("pictures/wolfResult.png", result)
 
 
 if __name__ == "__main__":
     main()
-
-
