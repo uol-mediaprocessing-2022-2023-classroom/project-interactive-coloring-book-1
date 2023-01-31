@@ -203,7 +203,7 @@ def find_zones_and_color_them(img1, img2, size_x, size_y, zone_size_threshold, c
             zone_list_small.append(zone_list[p])
 
     # die Zonen die kleiner als der Threshold sind, werden als weisse Zonen an den gleichen Koordinaten,
-    # die sie im Ursprungs-Bild haben, in das Greyscale-Bild übertragen
+    # die sie im Ursprungs-Bild haben, in das RGB-Bild übertragen
     for p in range(0, len(zone_list_small)):
         for q in range(0, len(zone_list_small[p])):
             img2.putpixel((zone_list_small[p][q][0], zone_list_small[p][q][1]), color_code)
@@ -263,6 +263,7 @@ def create_mask(img, zone_size_threshold):
 
 
 '''
+    Quelle: https://stackoverflow.com/questions/12201577/how-can-i-convert-an-rgb-image-into-grayscale-in-python
     Wandelt ein rgb-numpy array in grayscale um
     
     Parameters
@@ -327,6 +328,7 @@ def mask_slic(img, mask, slic_segments):
 
 
 '''
+    Quelle: https://www.geeksforgeeks.org/create-transparent-png-image-with-python-pillow/
     Legt das durch SLIC erstellte Bild, welches durch die Maske nur ein Ausschnitt des gesamten Bildes ist, über
     das mit kMeans erstellte Bild, um wieder ein vollständiges Bild zu erhalten
 
