@@ -1,0 +1,943 @@
+import cv2
+import numpy
+from PIL import Image
+from skimage import segmentation
+from skimage.color import label2rgb
+from sklearn.cluster import k_means
+
+'''
+    wendet k-Means auf das übergebene Bild an, was das Bild in eine festgelegte Anzahl von Farben einteilt
+
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Das zu bearbeitende Bild als numpy.ndarray
+    blur_kernel_size : int
+        Die Grösse die der Kernel für das Blurren mit dem Gaussfilter haben soll
+
+    Returns
+    -------
+    result_img : numpy.ndarray
+        Das mit kmeans bearbeitete Bild wird als numpy.ndarray in BGR zurückgegeben
+'''
+
+
+def k_means(img, blur_kernel_size, k):
+    # das Bild wird geblurrt, zur besseren Weiterverarbeitung
+    img = cv2.GaussianBlur(img, (blur_kernel_size, blur_kernel_size), 0)
+
+    # dasd Bildarray wird umgeformt und zu float32 konvertiert (ist durch cv2 unit8)
+    tmp_img = img.reshape((-1, 3))
+    tmp_img = numpy.float32(tmp_img)
+
+    # die Kriterien und die Anzahl der Farben für kmeans werden definiert und kmeans dann angewendet
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+
+    ret, label, center_result = cv2.kmeans(tmp_img, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+
+    # das Bildarray wird wieder zurück in uint8 konvertiert und wieder in die ursprüngliche Form umgeformt
+    center = numpy.uint8(center_result)
+    res = center[label.flatten()]
+    result_img = res.reshape(img.shape)
+
+    # das Resultat wird zurückgegeben
+    return result_img, center_result
+
+
+'''
+    Findet alle Zonen in einem Bild die kleiner sind, als der übergegebene Schwellenwert und übertragt diese Zonen
+    an gleicher Stelle in ein zweites gleich grösses Bild in der angegebenen Farbe
+
+    Anmerkung: Für unsere Zwecke wäre es zwar sinnvoller gewesen direkt ein Binary oder Grayscale Bild zu erstellen,
+    anstatt ein schwarz-weiss Bild, das trotzdem in RGB codiert ist. Jedoch funktioniert die CheckNeighbour-Methode
+    nur mit RGB-Bildern und um diese nicht extra umschreiben zu müssen, wird das Bild in RGB erstellt und dann 
+    umgewandelt
+
+    Parameters
+    ----------
+    img1 : PIL.Image.Image
+        Das erste Bild in denen die Zonen gesucht werden soll
+    img2 : PIL.Image.Image
+        Das zweite Bild in denen die Zonen übertragen werden sollen
+    size_x
+        die Breite der Bilder
+    size_y 
+        die Höhe der Bilder
+    zone_size_threshold
+        der Schwellenwert für die Zonengrösse
+    color_code
+        der Farbcode für die Färbung der Zellen
+
+    Returns
+    -------
+    img_2 : PI.Image.Image
+        das zweite Bild wird mit den neu übertragen Zonen zurückgegeben
+'''
+
+
+def find_zones_and_color_them(img1, img2, size_x, size_y, zone_size_threshold, color_code):
+    # Spielraum der Farbe
+    colour_toleranz = 0
+
+    # lädt Matrix mit Pixel Farben
+    pixel_colour = img1.load()
+
+    # erstellt eine Liste für alle Zonen, die erkannt werden
+    zone_list = []
+
+    # erstellt boolean Matrix in größe des Bildes um erkannte Pixel abzuhaken
+    pixel_matrix = createPixelList(size_x, size_y)
+
+    # erstellt integer Matrix in größe des Bildes, um Zone des Pixels einzutragen
+    pixel_zone_matrix = createZonePixelList(size_x, size_y)
+
+    # Zonen Index, um den verschiedenen Pixeln eine Zone zuzuweisen
+    index_of_zone = 0
+
+    # gehe Pixel für Pixel des Bildes durch
+    for x in range(0, size_x):
+        for y in range(0, size_y):
+            # wenn der Pixel zu keiner Zone gehört, suche alle Pixel, die aneinander liegen und dieselbe Farbe haben
+            if not pixel_matrix[x, y]:
+                colour_of_zone = pixel_colour[x, y]
+                zone, pixel_matrix, pixel_zone_matrix = checkNeighbour(x, y, pixel_matrix, pixel_zone_matrix,
+                                                                       pixel_colour, colour_of_zone, size_x, size_y,
+                                                                       index_of_zone, colour_toleranz)
+                zone_list.append(zone)
+
+                # erhöht Zonen Index nach erkannter Zone
+                index_of_zone = index_of_zone + 1
+
+    # Array zur Speicherung der Zonen die kleiner als zoneSizeThreshold sind
+    zone_list_small = []
+
+    # fügt zone_list_small die Zonen zu, die kleiner als zoneSizeThreshold sind
+    for p in range(0, len(zone_list)):
+        if len(zone_list[p]) < zone_size_threshold:
+            zone_list_small.append(zone_list[p])
+
+    # die Zonen die kleiner als der Threshold sind, werden als weisse Zonen an den gleichen Koordinaten,
+    # die sie im Ursprungs-Bild haben, in das RGB-Bild übertragen
+    for p in range(0, len(zone_list_small)):
+        for q in range(0, len(zone_list_small[p])):
+            img2.putpixel((zone_list_small[p][q][0], zone_list_small[p][q][1]), color_code)
+
+    return img2
+
+
+'''
+    Erstellt eine Maske des Bildes zur Weiterbearbeitung mit SLIC.
+    Alle Bereiche die grösser als der Threshold sind werden maskiert, damit SLIC diese nicht beachtet
+    Zudem werden Löcher in der Maske geschlossen die kleiner als 1000px sind
+
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Das zu bearbeitende Bild als numpy.ndarray
+    zone_size_threshold : int
+        Der Schwellenwert den die Zonen unterbieten müssen, um nicht maskiert zu werden
+
+    Returns
+    -------
+    result_mask : numpy.ndarray
+        Die erstellte Maske wird als numpy.ndarray in Grayscale zurückgegeben
+'''
+
+
+def create_mask(img, zone_size_threshold):
+    # das numpy.ndarray wird zu PIL.Image.Image umgewandelt
+    img = Image.fromarray(img)
+    # breite und höhe des Bildes
+    size_x, size_y = img.size
+    # erstellt ein komplett schwarzes RGB-Bild als PIL.Image.Image, welches die gleiche Grösse hat, wie unser Bild
+    mask = Image.new("RGB", (size_x, size_y), (0, 0, 0))
+    # Erstellung der Maske
+    mask = find_zones_and_color_them(img, mask, size_x, size_y, zone_size_threshold, (255, 255, 255))
+    # Abspeicherung des Bildes zu Testzwecken
+    mask.save("testMask.png")
+
+    # Umwandlung des PIL.Image.Image zu numpy.ndarray zur Weiterverarbeitung
+    result_mask = numpy.array(mask)
+    # Umwandlung des numpy.array von rgb in grayscale
+    result_mask = rgb2gray(result_mask)
+
+    # Schliessen von Löchern in der Maske
+    result_closed_mask = find_zones_and_color_them(mask, mask, size_x, size_y, 1000, (0, 0, 0))
+    # Umwandlung des PIL.Image.Image zu numpy.ndarray zur Weiterverarbeitung
+    result_closed_mask = numpy.array(result_closed_mask)
+    # Umwandlung des numpy.array von rgb in grayscale
+    result_closed_mask = rgb2gray(result_closed_mask)
+
+    # Abspeicherung des Bildes zu Testzwecken
+    cv2.imwrite("testClosedMask.png", result_closed_mask)
+
+    # das Resultat wird zurückgegeben (zurzeit zu Testzwecken die Maske mit und ohne LÖcher) (TODO: Ändern)
+    return result_closed_mask
+
+
+'''
+    Quelle: https://stackoverflow.com/questions/12201577/how-can-i-convert-an-rgb-image-into-grayscale-in-python
+    Wandelt ein rgb-numpy array in grayscale um
+
+    Parameters
+    ---------
+
+    rgb : numpy.ndarray
+        das Bild das umgewandelt werden als numpy.ndarray in rgb
+
+    Returns
+    -------
+
+    gray : numpy.ndarray
+        das umgewandelte Bild als numpy.ndarray in grayscale
+'''
+
+
+def rgb2gray(rgb):
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    gray = 0.2989 * r + 0.5870 * g + 0.1140 * b
+
+    return gray
+
+
+'''
+    Wendet mit Hilfe einer Maske SLIC auf das zu bearbeitende Bild an.
+    Die Maske sorgt dafür, das SLIC nur auf relevante Teile angewandt wird
+    und nicht auf grosse einfarbige Segmente des Bildes.
+    SLIC sorgt dafür, dass das Bild in Superpixel aufgeteilt wird
+
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Das zu bearbeitende Bild als numpy.ndarray in BGR
+    mask : numpy.ndarray
+        Die Maske die verwendet werden soll als numpy.ndarray in Grayscale
+
+    Returns
+    -------
+    result_img : PIL.Image.Image
+        Der unmaskierte Teil des Bildes der mit SLIC bearbeitet wurde, wird als PIL.Image.Image zurückgegeben
+'''
+
+
+def mask_slic(img, mask, slic_segments):
+    # opencv2 benutzt standardmässig BGR, wir brauchen nun aber RGB: Daher wird das Bild nun in RGB konvertiert
+    tmp_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # SLIC wird auf den unmaskierten Teil des Bildes angewandt und das Bild wird in Superpixel segmentiert
+    m_slic = segmentation.slic(tmp_img, n_segments=slic_segments, mask=mask, compactness=1)
+
+    # die durchschnittliche Farbe eines Superpixel wird nun verwendet um diesen Superpixel auszufüllen
+    tmp_img = label2rgb(m_slic, tmp_img, kind='avg')
+
+    # wandelt das numpy.ndarray zu PIL.Image.Image um (Grund: für die Weiterverarbeitung wird eine Image Datei und
+    # kein Array benötigt)
+    result_img = Image.fromarray(tmp_img, 'RGB')
+
+    # Abspeicherung des Bildes zu Testzwecken
+    result_img.save("testSLIC.png")
+
+    # das Resultat wird zurückgegeben
+    return result_img
+
+
+'''
+    Quelle: https://www.geeksforgeeks.org/create-transparent-png-image-with-python-pillow/
+    Legt das durch SLIC erstellte Bild, welches durch die Maske nur ein Ausschnitt des gesamten Bildes ist, über
+    das mit kMeans erstellte Bild, um wieder ein vollständiges Bild zu erhalten
+
+    Parameters
+    ----------
+    foreground : PIL.Image.Image
+        Der von SLIC bearbeitete Ausschnitt des Bildes der über das von kMeans erstellte Bild gelegt wird, als 
+        PIL.Image.Image
+    background : numpy.ndarray
+        Das von kMeans erstellte Bild, auf das der Ausschnit gelegt wird, als numpy.ndarray
+
+    Returns
+    -------
+    result_img : PIL.Image.Image
+        Das zusammengefügte Bild als PIL.Image.Image
+'''
+
+
+def combine_mask_slic_and_kmeans(foreground, background):
+    # konvertiert den Vordergrund zur RGBA
+    foreground_rgba = foreground.convert("RGBA")
+
+    # das Bild wird in eine eindimensionale Sequenz von Pixeln gewandelt
+    datas = foreground_rgba.getdata()
+
+    new_data = []
+
+    # findet anhand des RGBA-Wertes schwarze Farbe, und speichert diese dann anstatt schwarz als transparent ab
+    # andere Farben bleiben unverändert
+    for item in datas:
+        if item[0] == 0 and item[1] == 0 and item[2] == 0:
+            new_data.append((255, 255, 255, 0))
+        else:
+            new_data.append(item)
+
+    # die eindimensionale Sequenz von Pixeln wird wieder in ein Bild umgewandelt
+    foreground_rgba.putdata(new_data)
+
+    foreground_rgba.save("testTransparent.png")
+
+    # der Hintergrund ist in BGR und muss in RGB umgewandelt
+    background = cv2.cvtColor(background, cv2.COLOR_BGR2RGB)
+
+    # der Hintergrund wird von numpy.ndarray in PIL.Image.Image umgewandelt
+    background = Image.fromarray(background)
+
+    # Fügt den Vordergrund auf den Hintergrund ein
+    # fängt bei den Koordinaten (0,0) an
+    background.paste(foreground_rgba, (0, 0), mask=foreground_rgba)
+
+    result_img = background
+
+    # Abspeicherung des Bildes zu Testzwecken
+    result_img.save("testSLICandKCombined.png")
+
+    # das Resultat wird zurückgegeben
+    return result_img
+
+
+# erstellt pixel matrix in Größe des Bildes: 0 = unbenutzt, 1 = benutzt
+def createPixelList(size_x_1, size_y_1):
+    pixel_list = numpy.zeros((size_x_1, size_y_1))
+    return pixel_list
+
+
+# erstellt pixel matrix in Größe des Bildes: 0 = unbenutzt, 1 = benutzt
+def createZonePixelList(size_x_1, size_y_1):
+    zone_pixel_list = numpy.zeros((size_x_1, size_y_1))
+    return zone_pixel_list
+
+
+# überprüft Nachbarn des Pixels
+def checkNeighbour(x, y, pixel_matrix, pixel_zone_matrix, pixel_colour, colour_of_zone, size_x, size_y, index_of_zone,
+                   colour_toleranz):
+    # erstellt Array der Zone [x,y]
+    zone = []
+    # erstellt Warteschlangenarray [x,y]
+    queue_to_check = [[x, y]]
+    # hakt Pixel ab, dass er einer Zone hinzugefügt wurde
+    pixel_matrix[x, y] = True
+    # trägt dem Pixel seine Zone als Integer ein
+    pixel_zone_matrix[x, y] = index_of_zone
+
+    # solange ein Pixel in der Warteschlange ist
+    while len(queue_to_check) >= 1:
+        # übernimmt ersten Pixel aus der Warteschlange, entfernt diesen dort und fügt Zone hinzu
+        x_to_check = queue_to_check[0][0]
+        y_to_check = queue_to_check[0][1]
+        queue_to_check.pop(0)
+        zone.append([x_to_check, y_to_check])
+
+        # prüft von-Neumann-Nachbarn oben
+        if y_to_check != 0 and not pixel_matrix[x_to_check, y_to_check - 1]:
+            # nehme Farbe des zu prüfenden Pixels und schaue, ob diese im Toleranz Bereich zur Zone liegt
+            colour = pixel_colour[x_to_check, y_to_check - 1]
+            if colour_of_zone[0] + colour_toleranz >= colour[0] >= colour_of_zone[0] - colour_toleranz and \
+                    colour_of_zone[1] + colour_toleranz >= colour[1] >= \
+                    colour_of_zone[1] - colour_toleranz and colour_of_zone[2] + colour_toleranz >= colour[2] >= \
+                    colour_of_zone[2] - colour_toleranz:
+                # füge Pixel zur Warteschlange hinzu, trage ihn als Zone zugewiesen ein und trage Zonen index ein
+                queue_to_check.append([x_to_check, y_to_check - 1])
+                pixel_matrix[x_to_check, y_to_check - 1] = True
+                pixel_zone_matrix[x_to_check, y_to_check - 1] = index_of_zone
+        # prüft von-Neumann-Nachbarn rechts
+        if x_to_check + 1 < size_x and not pixel_matrix[x_to_check + 1, y_to_check]:
+            # nehme Farbe des zu prüfenden Pixels und schaue, ob diese im Toleranz Bereich zur Zone liegt
+            colour = pixel_colour[x_to_check + 1, y_to_check]
+            if colour_of_zone[0] + colour_toleranz >= colour[0] >= colour_of_zone[0] - colour_toleranz and \
+                    colour_of_zone[1] + colour_toleranz >= colour[1] >= \
+                    colour_of_zone[1] - colour_toleranz and colour_of_zone[2] + colour_toleranz >= colour[2] >= \
+                    colour_of_zone[2] - colour_toleranz:
+                # füge Pixel zur Warteschlange hinzu, trage ihn als Zone zugewiesen ein und trage Zonen index ein
+                queue_to_check.append([x_to_check + 1, y_to_check])
+                pixel_matrix[x_to_check + 1, y_to_check] = True
+                pixel_zone_matrix[x_to_check + 1, y_to_check] = index_of_zone
+        # prüft von-Neumann-Nachbarn unten
+        if y_to_check + 1 < size_y and not pixel_matrix[x_to_check, y_to_check + 1]:
+            # nehme Farbe des zu prüfenden Pixels und schaue, ob diese im Toleranz Bereich zur Zone liegt
+            colour = pixel_colour[x_to_check, y_to_check + 1]
+            if colour_of_zone[0] + colour_toleranz >= colour[0] >= colour_of_zone[0] - colour_toleranz and \
+                    colour_of_zone[1] + colour_toleranz >= colour[1] >= \
+                    colour_of_zone[1] - colour_toleranz and colour_of_zone[2] + colour_toleranz >= colour[2] >= \
+                    colour_of_zone[2] - colour_toleranz:
+                # füge Pixel zur Warteschlange hinzu, trage ihn als Zone zugewiesen ein und trage Zonen index ein
+                queue_to_check.append([x_to_check, y_to_check + 1])
+                pixel_matrix[x_to_check, y_to_check + 1] = True
+                pixel_zone_matrix[x_to_check, y_to_check + 1] = index_of_zone
+        # prüft von-Neumann-Nachbarn links
+        if x_to_check != 0 and not pixel_matrix[x_to_check - 1, y_to_check]:
+            # nehme Farbe des zu prüfenden Pixels und schaue, ob diese im Toleranz Bereich zur Zone liegt
+            colour = pixel_colour[x_to_check - 1, y_to_check]
+            if colour_of_zone[0] + colour_toleranz >= colour[0] >= colour_of_zone[0] - colour_toleranz and \
+                    colour_of_zone[1] + colour_toleranz >= colour[1] >= \
+                    colour_of_zone[1] - colour_toleranz and colour_of_zone[2] + colour_toleranz >= colour[2] >= \
+                    colour_of_zone[2] - colour_toleranz:
+                # füge Pixel zur Warteschlange hinzu, trage ihn als Zone zugewiesen ein und trage Zonen index ein
+                queue_to_check.append([x_to_check - 1, y_to_check])
+                pixel_matrix[x_to_check - 1, y_to_check] = True
+                pixel_zone_matrix[x_to_check - 1, y_to_check] = index_of_zone
+    return zone, pixel_matrix, pixel_zone_matrix
+
+
+# merged die kleinen Zonen in größere
+def mergeSmallZones(zone_list, zonen_toleranz, pixel_zone_matrix, size_x):
+    # geht komplette Zonen Liste durch
+    for zone in range(0, int(len(zone_list))):
+        # wenn die Zone < zonen_toleranz
+        if int(len(zone_list[zone])) < zonen_toleranz:
+            # nimm ersten Pixel aus der Zone
+            pixel = zone_list[zone][0]
+            pxl_x = pixel[0]
+            pxl_y = pixel[1]
+            # nimm den Zonen Index dieses Pixels
+            index_of_pixel = int(pixel_zone_matrix[pxl_x, pxl_y])
+
+            # speichert den neuen Zonen Index des Pixels ab
+            new_index = 0
+
+            # solange Nachbar Pixel zur selben Zone gehört, wird dieser Wert erhöht
+            check_index = 1
+            checked = False
+            while not checked:
+                # prüft von-Neumann-Nachbarn oben, ob der Pixel zu einer anderen Zone gehört
+                if pxl_x - check_index >= 0 and pixel_zone_matrix[pxl_x - check_index, pxl_y] != index_of_pixel:
+                    # möglicher neuer Index wird auf länge der Zone geprüft
+                    ind = int(pixel_zone_matrix[pxl_x - check_index, pxl_y])
+                    if len(zone_list[ind]) > 50:
+                        new_index = pixel_zone_matrix[pxl_x - check_index, pxl_y]
+                        break
+                # prüft von-Neumann-Nachbarn unten, ob der Pixel zu einer anderen Zone gehört
+                if pxl_x + check_index < size_x and pixel_zone_matrix[pxl_x + check_index, pxl_y] != index_of_pixel:
+                    # möglicher neuer Index wird auf länge der Zone geprüft
+                    ind = int(pixel_zone_matrix[pxl_x + check_index, pxl_y])
+                    if len(zone_list[ind]) > 50:
+                        new_index = pixel_zone_matrix[pxl_x + check_index, pxl_y]
+                        break
+                # erhöhe den Abstand zu nächsten Pixel
+                check_index = check_index + 1
+
+            # füge alle Pixel der kleinen Zone der neuen großen Zone hinzu und trage Zonen Index neu ein
+            for p in range(0, len(zone_list[index_of_pixel])):
+                zone_list[int(new_index)].append(zone_list[index_of_pixel][p])
+                old_x = zone_list[index_of_pixel][p][0]
+                old_y = zone_list[index_of_pixel][p][1]
+                pixel_zone_matrix[old_x, old_y] = int(new_index)
+
+    # lösche alle kleinen Zonen aus gesamter Zonen Liste
+    delete = []
+    # füge kleine Zonen der Löschliste hinzu = immer vorne einfügen, sonst ändert sich der Index all der anderen Zonen beim Entfernen
+    for zone in range(0, int(len(zone_list))):
+        if int(len(zone_list[zone])) < zonen_toleranz:
+            delete.insert(0, zone)
+
+    # entferne kleine Zonen aus der gesamten Zonen Liste
+    for zone in range(0, len(delete)):
+        zone_list.pop(delete[zone])
+
+    return zone_list, pixel_zone_matrix
+
+
+# print the edge image
+def createEdgeImage(size_x, size_y, image_edge, edge_pixel_matrix, pixel_zone_matrix):
+    for x in range(0, size_x):
+        for y in range(0, size_y):
+            if not edge_pixel_matrix[x, y]:
+                zone_index = pixel_zone_matrix[x, y]
+                image_edge = checkNewEdge(size_x, size_y, x, y, edge_pixel_matrix, zone_index, pixel_zone_matrix,
+                                          image_edge)
+    image_edge.save("Edge.jpg")
+    return image_edge
+
+
+# Method to print all the edges
+def checkNewEdge(size_x, size_y, x_to_check, y_to_check, edge_pixel_matrix, zone_index, pixel_zone_matrix, image_edge):
+    # erstellt warteschlange
+    queue_to_check = [[x_to_check, y_to_check]]
+    # trägt pixel als bereits geprüften Pixel ein
+    edge_pixel_matrix[x_to_check, y_to_check] = True
+
+    # solange ein Pixel in der Warteschlange ist
+    while len(queue_to_check) >= 1:
+        # nimm Pixel zu prüfen
+        x_to_check = queue_to_check[0][0]
+        y_to_check = queue_to_check[0][1]
+        # lösche Pixel aus Warteschlange
+        queue_to_check.pop(0)
+        # erstellt Rahmen
+        if x_to_check == 0 or x_to_check == size_x - 1 or y_to_check == 0 or y_to_check == size_y - 1:
+            image_edge.putpixel((x_to_check, y_to_check), (0, 0, 0))
+
+        # prüft von-Neumann-Nachbarn oben
+        if y_to_check != 0 and not edge_pixel_matrix[x_to_check, y_to_check - 1]:
+            this_index = pixel_zone_matrix[x_to_check, y_to_check - 1]
+            if zone_index == this_index:
+                queue_to_check.append([x_to_check, y_to_check - 1])
+                edge_pixel_matrix[x_to_check, y_to_check - 1] = True
+            else:
+                image_edge.putpixel((x_to_check, y_to_check), (0, 0, 0))
+        # prüft von-Neumann-Nachbarn rechts
+        if x_to_check + 1 < size_x and not edge_pixel_matrix[x_to_check + 1, y_to_check]:
+            this_index = pixel_zone_matrix[x_to_check + 1, y_to_check]
+            if zone_index == this_index:
+                queue_to_check.append([x_to_check + 1, y_to_check])
+                edge_pixel_matrix[x_to_check + 1, y_to_check] = True
+            else:
+                image_edge.putpixel((x_to_check, y_to_check), (0, 0, 0))
+        # prüft von-Neumann-Nachbarn unten
+        if y_to_check + 1 < size_y and not edge_pixel_matrix[x_to_check, y_to_check + 1]:
+            this_index = pixel_zone_matrix[x_to_check, y_to_check + 1]
+            if zone_index == this_index:
+                queue_to_check.append([x_to_check, y_to_check + 1])
+                edge_pixel_matrix[x_to_check, y_to_check + 1] = True
+            else:
+                image_edge.putpixel((x_to_check, y_to_check), (0, 0, 0))
+        # prüft von-Neumann-Nachbarn links
+        if x_to_check != 0 and not edge_pixel_matrix[x_to_check - 1, y_to_check]:
+            this_index = pixel_zone_matrix[x_to_check - 1, y_to_check]
+            if zone_index == this_index:
+                queue_to_check.append([x_to_check - 1, y_to_check])
+                edge_pixel_matrix[x_to_check - 1, y_to_check] = True
+            else:
+                image_edge.putpixel((x_to_check, y_to_check), (0, 0, 0))
+    return image_edge
+
+
+# gibt die zone als Bild aus
+def printImage(centers, zone_list, font_size, k_mean_colour, pixel_colour):
+    # liest das Kanten Bild ein, um dort die Zahlen einzuzeichnen
+    im = cv2.imread("Edge.jpg")
+
+    # geht alle Zonen durch
+    for p in range(0, len(centers)):
+        # nehme den center pixel
+        pixel = centers[p]
+
+        # zeichne Zahl in das neue Bild ein
+        number = str(calculateColourNumber(pixel, k_mean_colour, pixel_colour))
+
+        # LÜCKENFÜLLER FÜR BERECHNETEN PIXEL
+        # teile die Zone durch 2 und zeichne auf Pixel die Zahl
+        x_mid = pixel[0]
+        y_mid = pixel[1]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        position = (x_mid - 3, y_mid + 3)
+        fontScale = font_size
+        n = int(int(number) - 1)
+        fontColor = (0, 0, 0)
+
+        cv2.putText(im, number,
+                    position,
+                    font,
+                    fontScale,
+                    fontColor)
+
+    # speichert das neue Bild
+    cv2.imwrite("Fertig.jpg", im)
+
+
+# berechnet die Nummer der Zone
+def calculateColourNumber(pixel, k_mean_colour, pixel_colour):
+    # initialisiere die Nummer der Zone = 0 = Fehler (Da Zahlen bei 1 Anfangen)
+    number = 0
+
+    # nehme die Farbe der Zone anhand des Pixels (RGB)
+    zone_colour = pixel_colour[pixel[0], pixel[1]]
+
+    # kleinster Abstand startet bei dem größten möglichen Abstand (255+255+255)
+    diff = 765
+    # gehe nun alle Farben von K-Mean durch
+    for c in range(0, len(k_mean_colour)):
+        # berechne die Differenz zur k-mean Farbe
+        diff_to_check = abs(k_mean_colour[c][0] - zone_colour[2]) + abs(k_mean_colour[c][1] - zone_colour[1]) + abs(
+            k_mean_colour[c][2] - zone_colour[0])
+        # wenn die Differenz kleiner als die vorherige ist, trage sie als neue Zonen Farbe ein
+        if diff_to_check < diff:
+            diff = diff_to_check
+            number = c + 1
+
+    return number
+
+
+# berechnet das Zentrum von jeder Zone
+def calculateZoneCenters(size_x, size_y, zone_list, pixel_zone_matrix):
+    centers = []
+    centers_size = []
+    for z in range(0, len(zone_list)):
+        center, center_size = calculateZoneCenter(size_x, size_y, zone_list[z], pixel_zone_matrix)
+        centers.append(center)
+        centers_size.append(center_size)
+    return centers, centers_size
+
+
+# berechnet das Zentrum von einer Zone
+def calculateZoneCenter(size_x, size_y, zone, pixel_zone_matrix):
+    zone_index = pixel_zone_matrix[int(zone[0][0]), int(zone[0][1])]
+    biggest_center = 0
+    center = []
+    for p in range(0, len(zone)):
+        x = zone[p][0]
+        y = zone[p][1]
+        center_size = 1
+        bigger = True
+        while bigger:
+            if center_size <= 50:
+                # prüfe oben
+                if x - center_size > -1 and pixel_zone_matrix[x - center_size, y] == zone_index:
+                    # prüfe rechts
+                    if y + center_size < size_y and pixel_zone_matrix[x, y + center_size] == zone_index:
+                        # prüfe unten
+                        if x + center_size < size_x and pixel_zone_matrix[x + center_size, y] == zone_index:
+                            # prüfe links
+                            if y - center_size > -1 and pixel_zone_matrix[x, y - center_size] == zone_index:
+                                center_size = center_size + 1
+                            else:
+                                bigger = False
+                                break
+                        else:
+                            bigger = False
+                            break
+                    else:
+                        bigger = False
+                        break
+                else:
+                    bigger = False
+                    break
+                pass
+            else:
+                bigger = False
+            if biggest_center < center_size:
+                biggest_center = center_size
+                center = [x, y]
+    return center, biggest_center
+
+
+# sortiert die Matrix der Zonen neu
+def sortMatrix(zone_list, pixel_zone_matrix):
+    for zone in range(0, len(zone_list)):
+        for pixel in range(0, len(zone_list[zone])):
+            pixel_zone_matrix[zone_list[zone][pixel][0], zone_list[zone][pixel][1]] = zone
+    return pixel_zone_matrix
+
+
+# merged die schmalen Zonen in ihre Nachbarn
+def mergeNarrowZones(narrow_toleranz, centers, centers_size, pixel_zone_matrix, size_x, size_y, zone_list):
+    # index Liste aller zonen, die gelöscht werden müssen
+    delete = []
+
+    # geht komplette center größen Liste durch
+    for index in range(0, len(centers_size)):
+        # wenn der center < narrow_toleranz
+        if int(centers_size[index]) <= narrow_toleranz and centers[index]:
+            # nimm den Center Pixel
+            pixel = centers[index]
+            pxl_x = pixel[0]
+            pxl_y = pixel[1]
+            # nimm den Zonen Index dieses Pixels
+            index_of_pixel = int(pixel_zone_matrix[pxl_x, pxl_y])
+            # füge diese Zoner zum Löschen hinzu
+            delete.insert(0, pixel_zone_matrix[centers[index][0], centers[index][1]])
+            # speichert den neuen Zonen Index des Pixels ab
+            new_index = 0
+
+            # solange Nachbar Pixel zur selben Zone gehört, wird dieser Wert erhöht
+            check_index = 1
+            checked = False
+            while not checked:
+                # prüft von-Neumann-Nachbarn links, ob der Pixel zu einer anderen Zone gehört
+                if pxl_x - check_index >= 0 and pixel_zone_matrix[pxl_x - check_index, pxl_y] != index_of_pixel:
+                    new_index = pixel_zone_matrix[pxl_x - check_index, pxl_y]
+                    break
+                # prüft von-Neumann-Nachbarn rechts, ob der Pixel zu einer anderen Zone gehört
+                if pxl_x + check_index < size_x and pixel_zone_matrix[pxl_x + check_index, pxl_y] != index_of_pixel:
+                    new_index = pixel_zone_matrix[pxl_x + check_index, pxl_y]
+                    break
+                # prüft von-Neumann-Nachbarn oben, ob der Pixel zu einer anderen Zone gehört
+                if pxl_y - check_index >= 0 and pixel_zone_matrix[pxl_x, pxl_y - check_index] != index_of_pixel:
+                    new_index = pixel_zone_matrix[pxl_x, pxl_y - check_index]
+                    break
+                # prüft von-Neumann-Nachbarn unten, ob der Pixel zu einer anderen Zone gehört
+                if pxl_y + check_index < size_y and pixel_zone_matrix[pxl_x, pxl_y + check_index] != index_of_pixel:
+                    new_index = pixel_zone_matrix[pxl_x, pxl_y + check_index]
+                    break
+
+                # erhöhe den Abstand zu nächsten Pixel
+                check_index = check_index + 1
+
+            # füge alle Pixel der kleinen Zone der neuen großen Zone hinzu und trage Zonen Index neu ein
+            for p in range(0, len(zone_list[index_of_pixel])):
+                zone_list[int(new_index)].append(zone_list[index_of_pixel][p])
+                old_x = zone_list[index_of_pixel][p][0]
+                old_y = zone_list[index_of_pixel][p][1]
+                pixel_zone_matrix[old_x, old_y] = int(new_index)
+
+    # entferne kleine Zonen aus der gesamten Zonen Liste
+    for zone in range(0, len(delete)):
+        zone_list.pop(int(delete[zone]))
+
+    return zone_list, pixel_zone_matrix
+
+
+# erstellt eine Farbpalette mit k Farben
+def create_palette(k_mean_colour, size_x):
+    colour_size = 50
+    amount_of_colours = len(k_mean_colour)
+    amount_of_colours_in_a_row = int(size_x / colour_size)
+
+    # erstellt das paletten Bild
+    size_x = amount_of_colours_in_a_row * colour_size
+
+    amount_of_rows = amount_of_colours / amount_of_colours_in_a_row
+    if amount_of_rows > int(amount_of_rows):
+        amount_of_rows = int(amount_of_rows) + 1
+    else:
+        amount_of_rows = int(amount_of_rows)
+    size_y = colour_size * amount_of_rows
+
+    image_palette = Image.new("RGB", (int(size_x), int(size_y)), (255, 255, 255))
+
+    # Farben-Zähler
+    colour_counter = 0
+    # für jede Reihe
+    for row in range(0, amount_of_rows):
+        # für alle Farben in dieser Reihe
+        for colour_in_row in range(0, amount_of_colours_in_a_row):
+
+            c_x = colour_size * colour_in_row
+            c_y = colour_size * row
+
+            for x in range(0, colour_size):
+                x_c = x + c_x
+                for y in range(0, colour_size):
+                    y_c = y + c_y
+
+                    if colour_counter < amount_of_colours:
+                        image_palette.putpixel((x_c, y_c), (
+                            int(k_mean_colour[colour_counter][2]), int(k_mean_colour[colour_counter][1]),
+                            int(k_mean_colour[colour_counter][0])))
+            colour_counter = colour_counter + 1
+    image_palette.save('palette.png')
+    palette = cv2.imread("palette.png")
+    palette = palette.copy()
+
+    # zeichne Zahl in das neue Bild ein
+    colour = 0
+    number = 1
+
+    for row in range(0, amount_of_rows):
+        for colour_in_row in range(0, amount_of_colours_in_a_row):
+            if colour < amount_of_colours:
+                # LÜCKENFÜLLER FÜR BERECHNETEN PIXEL
+                # teile die Zone durch 2 und zeichne auf Pixel die Zahl
+                x_mid = int((colour_in_row * colour_size)) + 10
+                if int(number) > 9:
+                    x_mid = int((colour_in_row * colour_size))
+                y_mid = (row + 1) * 40
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                position = (x_mid, y_mid)
+                fontScale = 1
+
+                colour_spectrum = k_mean_colour[colour][0] + k_mean_colour[colour][1] + k_mean_colour[colour][2]
+                fontColor = (0, 0, 0)
+                if colour_spectrum < 200:
+                    fontColor = (255, 255, 255)
+
+                cv2.putText(palette, str(number),
+                            position,
+                            font,
+                            fontScale,
+                            fontColor)
+                colour = colour + 1
+                number = number + 1
+    cv2.imwrite("palette.png", palette)
+
+
+# skaliere Bild herunter
+def scaleImage(img):
+    max = 1333
+
+    size = img.shape
+    height = size[0]
+    width = size[1]
+
+    print("Größe vorher: ", width, height)
+    # 1500 * 700 => 150 . 70
+    w = width / 10
+    h = height / 10
+    index = 0
+    if width > height:
+        if width < max:
+            while width < max:
+                width = width + w
+                index = index + 1
+            height = height + (index * h)
+        else:
+            while width > max:
+                width = width - w
+                index = index + 1
+            height = height - (index * h)
+    else:
+        if height < max:
+            while height < max:
+                height = height + h
+                index = index + 1
+            width = width + (index * w)
+        else:
+            while height > max:
+                height = height - h
+                index = index + 1
+            width = width - (index * w)
+
+    print("Größe nachher: ", width, height)
+
+    img = cv2.resize(img, (int(width), int(height)))
+    return img
+
+
+# kombiniere das segmentierte Bild und die Farbpalette zu einem Bild
+def combineImage():
+    images = [Image.open(x) for x in ['Fertig.jpg', 'palette.png']]
+    widths, heights = zip(*(i.size for i in images))
+
+    total_height = sum(heights)
+    max_width = max(widths)
+
+    new_im = Image.new('RGB', (max_width, total_height), (255, 255, 255))
+
+    y_offset = 0
+    for im in images:
+        new_im.paste(im, (0, y_offset))
+        y_offset += im.size[1]
+
+    new_im.save('Ergebnis.jpg')
+
+
+def create_segments(picture, k, zonen_toleranz, narrow_toleranz):
+    img = cv2.imread(picture)
+    img = scaleImage(img)
+
+    # Variablen defininiere, für Schwierigkeitsgrad ggf. ändern
+    first_blur = 17
+    second_blur = 11
+    zone_size_threshold = 75000
+    slic_segments = 1000
+
+    # Bild in Farbbereiche aufteilen
+    print('1')
+    k_means_img, k_mean_colour = k_means(img, first_blur, k)
+
+    # Abspeicherung des Bildes
+    print('2')
+    cv2.imwrite("kmean_first.png", k_means_img)
+
+    # erstellt eine Maske für SLIC
+    print('3')
+    closed_mask = create_mask(k_means_img, zone_size_threshold)
+
+    # superpixel erstellen
+    print('4')
+    slic_img = mask_slic(k_means_img, closed_mask, slic_segments)
+
+    # Kombinierung der von SLIC und k-means erstellten Bilder
+    print('5')
+    img = combine_mask_slic_and_kmeans(slic_img, k_means_img)
+
+    # PIL.Image.Image in numpy.ndarray umwandeln
+    print('6')
+    img = numpy.array(img)
+
+    # numpy.ndarray wird von RGB in BGR umgewandelt
+    print('7')
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    # kombinierte Bild noch einmal in die Farbbereiche aufteilen
+    print('8')
+    result, k_mean_colour = k_means(img, second_blur, k)
+
+    # Abspeicherung des Bildes
+    print('9')
+    cv2.imwrite("kmean.jpg", result)
+
+    print('10')
+
+    # Spielraum der farbe
+    colour_toleranz = 10
+    # größe der Zahlen
+    font_size = 0.4
+
+    # liest kmeans Bild ein und lädt Matrix mit Pixel Farben
+    print('11')
+    image = Image.open('kmean.jpg')
+    pixel_colour = image.load()
+
+    # erstellt eine Liste für alle Zonen, die erkannt werden
+    zone_list = []
+
+    # breite und höhe des Bildes
+    size_x, size_y = image.size
+
+    # erstellt boolean Matrix in größe des Bildes um erkannte Pixel abzuhaken
+    print('12')
+    pixel_matrix = createPixelList(size_x, size_y)
+
+    # erstellt integer Matrix in größe des Bildes, um Zone des Pixels einzutragen
+    print('13')
+    pixel_zone_matrix = createZonePixelList(size_x, size_y)
+
+    # Zonen Index, um den verschiedenen Pixeln eine Zone zuzuweisen
+    index_of_zone = 0
+
+    # gehe Pixel für Pixel des Bildes durch
+    print('14')
+    for x in range(0, size_x):
+        for y in range(0, size_y):
+            # wenn der Pixel zu keiner Zone gehört, suche alle Pixel, die aneinander liegen und dieselbe Farbe haben
+            if not pixel_matrix[x, y]:
+                colour_of_zone = pixel_colour[x, y]
+                zone, pixel_matrix, pixel_zone_matrix = checkNeighbour(x, y, pixel_matrix, pixel_zone_matrix,
+                                                                       pixel_colour, colour_of_zone, size_x, size_y,
+                                                                       index_of_zone, colour_toleranz)
+                zone_list.append(zone)
+
+                # erhöht Zonen Index nach erkannter Zone
+                index_of_zone = index_of_zone + 1
+
+    # merge alle kleinen Zonen in große Zonen
+    print('15')
+    zone_list, pixel_zone_matrix = mergeSmallZones(zone_list, zonen_toleranz, pixel_zone_matrix, size_x)
+    pixel_zone_matrix = sortMatrix(zone_list, pixel_zone_matrix)
+
+    # berechne das Zentrum von jeder Zone
+    print('16')
+    centers, centers_size = calculateZoneCenters(size_x, size_y, zone_list, pixel_zone_matrix)
+    print('16.1')
+    pixel_zone_matrix = sortMatrix(zone_list, pixel_zone_matrix)
+    print('16.2')
+    zone_list, pixel_zone_matrix = mergeNarrowZones(narrow_toleranz, centers, centers_size, pixel_zone_matrix,
+                                                    size_x,
+                                                    size_y, zone_list)
+    print("vorher ", len(centers))
+    pixel_zone_matrix = sortMatrix(zone_list, pixel_zone_matrix)
+    centers, centers_size = calculateZoneCenters(size_x, size_y, zone_list, pixel_zone_matrix)
+    print("nachher ", len(centers))
+
+    # erstellt das Kanten Bild und die dazugehörige boolean Matrix
+    print('17')
+    image_edge = Image.new("RGB", (size_x, size_y), (255, 255, 255))
+    edge_pixel_matrix = createZonePixelList(size_x, size_y)
+    createEdgeImage(size_x, size_y, image_edge, edge_pixel_matrix, pixel_zone_matrix)
+
+    # zeichne das Zahlen Bild
+    print('18')
+    printImage(centers, zone_list, font_size, k_mean_colour, pixel_colour)
+
+    # erstelle eine Farbpalette
+    print('19')
+    # erstelle die Farbpalette und füge diese unter das fertige Bild
+    create_palette(k_mean_colour, size_x)
+    combineImage()

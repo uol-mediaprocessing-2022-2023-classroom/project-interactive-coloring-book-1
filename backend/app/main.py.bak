@@ -48,7 +48,7 @@ async def get_blur(cldId, imgId, difficulty, background_tasks: BackgroundTasks):
     zonen_toleranz = 100
     narrow_toleranz = 10
 
-    if int(difficulty) == 1:
+if int(difficulty) == 1:
         k = 10
         zonen_toleranz = 100
         narrow_toleranz = 15
