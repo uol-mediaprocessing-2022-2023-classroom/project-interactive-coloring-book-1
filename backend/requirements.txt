@@ -3,3 +3,6 @@ pydantic>=1.8.0,<2.0.0
 uvicorn>=0.15.0,<0.16.0
 starlette>=0.17.1
 Pillow>=6.1.0
+scikit-image>=0.19.3
+scikit-learn>=1.2.1
+opencv-python>=4.7.0.68
